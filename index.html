@@ -19,7 +19,8 @@ button:disabled{opacity:.5}
 #status{padding:8px 14px;font-size:13px;color:#ffcf6b;min-height:34px}
 .stage{display:grid;grid-template-columns:1fr 340px;gap:8px;padding:0 8px 8px}
 #pano,#map{border-radius:10px;overflow:hidden;background:#000}
-#pano{height:62vh;min-height:260px}
+#pano{height:62vh;min-height:260px;position:relative}
+.pv{position:absolute;inset:0;opacity:0;transition:none}
 #map{height:62vh;min-height:260px}
 .side{display:flex;flex-direction:column;gap:8px}
 .bar{display:flex;gap:8px;align-items:center;padding:8px;flex-wrap:wrap}
@@ -47,7 +48,7 @@ button:disabled{opacity:.5}
 </header>
 <div id="status">Entrez votre clé API, un départ et une arrivée.</div>
 <div class="stage">
- <div id="pano"></div>
+ <div id="pano"><div id="pA" class="pv" style="opacity:1;z-index:1"></div><div id="pB" class="pv"></div></div>
  <div class="side"><div id="map"></div></div>
 </div>
 <div class="bar" id="ctl" hidden>
@@ -60,7 +61,7 @@ button:disabled{opacity:.5}
 
 <script>
 const $=id=>document.getElementById(id);
-let map,pano,svc,poly,marker,samples=[],heads=[],panos=[],idx=0,playing=false,timer=null,curPano=null,curHead=0,token=0,loaded=0;
+let map,pvs=null,front=0,swapT,endT,svc,poly,marker,samples=[],heads=[],panos=[],idx=0,playing=false,timer=null,curPano=null,curHead=0,token=0,loaded=0;
 const status=t=>$('status').textContent=t;
 try{const k=localStorage.getItem('gmkey');if(k)$('key').value=k;}catch(e){}
 
@@ -118,9 +119,29 @@ function stop(){playing=false;clearTimeout(timer);$('play').textContent='▶ Lec
 function interval(){return 1150-$('spd').value*100;}
 function show(i){
  const p=panos[i];
- if(p&&p!==curPano){pano.setPano(p);curPano=p;}
  const t=heads[i];let dl=((t-curHead+540)%360)-180;curHead=(curHead+dl*0.4+360)%360;
- pano.setPov({heading:curHead,pitch:0});
+ const pov={heading:curHead,pitch:0};
+ const ids=['pA','pB'];
+ if(p&&p!==curPano){
+  clearTimeout(swapT);clearTimeout(endT);
+  const first=curPano===null;
+  const back=first?front:1-front, old=front;
+  const be=$(ids[back]),oe=$(ids[old]);
+  pvs[back].setPano(p);pvs[back].setPov(pov);
+  curPano=p;
+  if(first){be.style.transition='none';be.style.opacity=1;be.style.zIndex=1;$(ids[1-back]).style.opacity=0;}
+  else{
+   be.style.transition='none';be.style.opacity=0;be.style.zIndex=2;oe.style.zIndex=1;
+   const d=Math.min(300,interval()*0.5);
+   swapT=setTimeout(()=>{
+    const dur=Math.max(120,interval()-d);
+    void be.offsetWidth;
+    be.style.transition='opacity '+dur+'ms linear';be.style.opacity=1;
+    front=back;
+    endT=setTimeout(()=>{oe.style.transition='none';oe.style.opacity=0;},dur+30);
+   },d);
+  }
+ }else if(pvs[front]){pvs[front].setPov(pov);}
  marker.setPosition(samples[i]);
  if(!map.getBounds()||!map.getBounds().contains(samples[i]))map.panTo(samples[i]);
  $('seek').value=i;
@@ -166,7 +187,7 @@ $('f').onsubmit=async e=>{
   heads=samples.map((p,i)=>bearing(p,samples[Math.min(i+4,samples.length-1)]));
   for(let i=samples.length-1;i>0&&hav(samples[i],samples[i-1])<1;i--)heads[i]=heads[i-1];
   panos=new Array(samples.length);loaded=0;idx=0;curPano=null;curHead=heads[0];
-  if(!pano)pano=new StreetViewPanorama($('pano'),{addressControl:false,linksControl:false,motionTracking:false,motionTrackingControl:false,showRoadLabels:false,enableCloseButton:false});
+  if(!pvs){const o={addressControl:false,linksControl:false,motionTracking:false,motionTrackingControl:false,showRoadLabels:false,enableCloseButton:false};pvs=[new StreetViewPanorama($('pA'),o),new StreetViewPanorama($('pB'),o)];}
   $('seek').max=samples.length-1;$('seek').value=0;$('ctl').hidden=false;
   status('Trajet de '+(r.dist/1000).toFixed(1)+' km, '+samples.length+' images. Lecture…');
   preload(my);
