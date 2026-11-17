@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Trajet Street View</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0f1419;color:#e8edf2}
+header{padding:12px 14px;background:#161d26;border-bottom:1px solid #263140}
+h1{font-size:18px;margin:0 0 10px}
+form{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+form .full{grid-column:1/-1}
+label{font-size:12px;color:#93a3b5;display:block;margin-bottom:3px}
+input,select,button{width:100%;padding:10px;border-radius:8px;border:1px solid #2d3a4a;background:#0f1419;color:#e8edf2;font-size:15px}
+button{background:#2f7df6;border-color:#2f7df6;font-weight:600;cursor:pointer}
+button.sec{background:#1d2733;border-color:#2d3a4a}
+button:disabled{opacity:.5}
+#status{padding:8px 14px;font-size:13px;color:#ffcf6b;min-height:34px}
+.stage{display:grid;grid-template-columns:1fr 340px;gap:8px;padding:0 8px 8px}
+#pano,#map{border-radius:10px;overflow:hidden;background:#000}
+#pano{height:62vh;min-height:260px}
+#map{height:62vh;min-height:260px}
+.side{display:flex;flex-direction:column;gap:8px}
+.bar{display:flex;gap:8px;align-items:center;padding:8px;flex-wrap:wrap}
+.bar button{width:auto;padding:10px 16px}
+.bar input[type=range]{padding:0;border:0;flex:1;min-width:120px}
+.info{font-size:13px;color:#93a3b5}
+@media(max-width:760px){
+ .stage{grid-template-columns:1fr}
+ #pano{height:45vh}
+ #map{height:28vh;min-height:180px}
+}
+</style>
+</head>
+<body>
+<header>
+ <h1>🛣️ Trajet en Street View</h1>
+ <form id="f">
+  <div class="full"><label for="key">Clé API Google Maps</label><input id="key" type="password" placeholder="AIza..." autocomplete="off"></div>
+  <div><label for="o">Départ</label><input id="o" value="Place d'Armes, Montréal, QC"></div>
+  <div><label for="d">Arrivée</label><input id="d" value="Château Frontenac, Québec, QC"></div>
+  <div><label for="m">Mode</label><select id="m"><option value="DRIVING">Voiture</option><option value="BICYCLING">Vélo</option><option value="WALKING">À pied</option></select></div>
+  <div><label for="s">Précision (distance entre images)</label><select id="s"><option value="10">10 m (fluide)</option><option value="20" selected>20 m</option><option value="40">40 m (rapide)</option></select></div>
+  <div class="full"><button id="go" type="submit">Charger le trajet</button></div>
+ </form>
+</header>
+<div id="status">Entrez votre clé API, un départ et une arrivée.</div>
+<div class="stage">
+ <div id="pano"></div>
+ <div class="side"><div id="map"></div></div>
+</div>
+<div class="bar" id="ctl" hidden>
+ <button id="play" type="button">▶ Lecture</button>
+ <button id="rst" type="button" class="sec">⏮</button>
+ <input id="seek" type="range" min="0" value="0">
+ <label style="margin:0">Vitesse <input id="spd" type="range" min="1" max="10" value="6" style="width:110px"></label>
+ <span class="info" id="info"></span>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+let map,pano,svc,poly,marker,samples=[],heads=[],panos=[],idx=0,playing=false,timer=null,curPano=null,curHead=0,token=0,loaded=0;
+const status=t=>$('status').textContent=t;
+try{const k=localStorage.getItem('gmkey');if(k)$('key').value=k;}catch(e){}
+
+function loadMaps(key){
+ return new Promise((res,rej)=>{
+  if(window.google&&google.maps&&google.maps.importLibrary)return res();
+  window.gm_authFailure=()=>status("Clé API refusée. Vérifiez la clé, ses restrictions et les API activées.");
+  const s=document.createElement('script');
+  s.src='https://maps.googleapis.com/maps/api/js?key='+encodeURIComponent(key)+'&v=weekly&loading=async';
+  s.onload=res;s.onerror=()=>rej(new Error('Impossible de charger Google Maps (réseau ou bloqueur).'));
+  document.head.appendChild(s);
+ });
+}
+const ll=p=>({lat:typeof p.lat==='function'?p.lat():p.lat,lng:typeof p.lng==='function'?p.lng():p.lng});
+function hav(a,b){const R=6371000,t=Math.PI/180,dl=(b.lat-a.lat)*t,dg=(b.lng-a.lng)*t;const x=Math.sin(dl/2)**2+Math.cos(a.lat*t)*Math.cos(b.lat*t)*Math.sin(dg/2)**2;return 2*R*Math.asin(Math.sqrt(x));}
+function bearing(a,b){const t=Math.PI/180,y=Math.sin((b.lng-a.lng)*t)*Math.cos(b.lat*t),x=Math.cos(a.lat*t)*Math.sin(b.lat*t)-Math.sin(a.lat*t)*Math.cos(b.lat*t)*Math.cos((b.lng-a.lng)*t);return(Math.atan2(y,x)/t+360)%360;}
+function sampleAlong(path,step){
+ const out=[path[0]];let carry=0;
+ for(let i=1;i<path.length;i++){
+  const a=path[i-1],b=path[i],d=hav(a,b);if(!d)continue;
+  let pos=step-carry;
+  while(pos<=d){const f=pos/d;out.push({lat:a.lat+(b.lat-a.lat)*f,lng:a.lng+(b.lng-a.lng)*f});pos+=step;}
+  carry=d-(pos-step);
+ }
+ out.push(path[path.length-1]);return out;
+}
+async function getRoute(o,d,mode){
+ const lib=await google.maps.importLibrary('routes');
+ try{
+  const r=await new lib.DirectionsService().route({origin:o,destination:d,travelMode:mode});
+  const rt=r.routes[0];const path=[];
+  rt.legs.forEach(l=>l.steps.forEach(s=>s.path.forEach(p=>path.push(ll(p)))));
+  return{path,dist:rt.legs.reduce((a,l)=>a+l.distance.value,0)};
+ }catch(e1){
+  if(!lib.Route||!lib.Route.computeRoutes)throw e1;
+  const {routes}=await lib.Route.computeRoutes({origin:o,destination:d,travelMode:mode,fields:['path','distanceMeters']});
+  if(!routes||!routes.length)throw e1;
+  return{path:routes[0].path.map(ll),dist:routes[0].distanceMeters};
+ }
+}
+function getPano(loc){
+ return new Promise(res=>svc.getPanorama({location:loc,radius:40,preference:google.maps.StreetViewPreference.NEAREST,source:google.maps.StreetViewSource.OUTDOOR},(d,s)=>res(s==='OK'?d.location.pano:null)));
+}
+async function preload(my){
+ let next=0;
+ const worker=async()=>{
+  while(my===token){
+   const i=next++;if(i>=samples.length)return;
+   panos[i]=await getPano(samples[i]);loaded++;
+  }
+ };
+ await Promise.all(Array.from({length:6},worker));
+}
+function stop(){playing=false;clearTimeout(timer);$('play').textContent='▶ Lecture';}
+function interval(){return 1150-$('spd').value*100;}
+function show(i){
+ const p=panos[i];
+ if(p&&p!==curPano){pano.setPano(p);curPano=p;}
+ const t=heads[i];let dl=((t-curHead+540)%360)-180;curHead=(curHead+dl*0.4+360)%360;
+ pano.setPov({heading:curHead,pitch:0});
+ marker.setPosition(samples[i]);
+ if(!map.getBounds()||!map.getBounds().contains(samples[i]))map.panTo(samples[i]);
+ $('seek').value=i;
+ $('info').textContent=Math.round(i/(samples.length-1)*100)+' %';
+}
+function tick(){
+ if(!playing)return;
+ const n=samples.length;
+ while(idx<n-1&&(panos[idx]===null||(panos[idx]===curPano&&idx>0)))idx++;
+ if(idx>=n-1&&panos[idx]!==undefined){show(n-1);stop();status('Arrivée !');return;}
+ if(panos[idx]===undefined){status('Chargement des vues… '+loaded+'/'+n);timer=setTimeout(tick,150);return;}
+ status('');show(idx);idx++;
+ timer=setTimeout(tick,interval());
+}
+function play(){
+ if(idx>=samples.length-1)idx=0;
+ playing=true;$('play').textContent='⏸ Pause';tick();
+}
+$('play').onclick=()=>playing?stop():play();
+$('rst').onclick=()=>{stop();idx=0;curPano=null;show(0);};
+$('seek').oninput=e=>{const was=playing;stop();idx=+e.target.value;while(idx>0&&panos[idx]===null)idx--;if(panos[idx])show(idx);if(was)play();};
+
+$('f').onsubmit=async e=>{
+ e.preventDefault();
+ const key=$('key').value.trim();
+ if(!key){status('Ajoutez votre clé API Google Maps.');return;}
+ try{localStorage.setItem('gmkey',key);}catch(_){}
+ stop();token++;const my=token;$('go').disabled=true;status('Calcul de l’itinéraire…');
+ try{
+  await loadMaps(key);
+  const {Map}=await google.maps.importLibrary('maps');
+  const {StreetViewPanorama,StreetViewService}=await google.maps.importLibrary('streetView');
+  const r=await getRoute($('o').value,$('d').value,$('m').value);
+  if(!map)map=new Map($('map'),{center:r.path[0],zoom:12,disableDefaultUI:true,zoomControl:true});
+  if(poly)poly.setMap(null);
+  poly=new google.maps.Polyline({path:r.path,map,strokeColor:'#2f7df6',strokeWeight:5});
+  const b=new google.maps.LatLngBounds();r.path.forEach(p=>b.extend(p));map.fitBounds(b);
+  if(!marker)marker=new google.maps.Marker({map,icon:{path:google.maps.SymbolPath.CIRCLE,scale:8,fillColor:'#ff4d4d',fillOpacity:1,strokeColor:'#fff',strokeWeight:2}});
+  svc=svc||new StreetViewService();
+  let step=+$('s').value;
+  step=Math.max(step,r.dist/2500); // limite ~2500 images
+  samples=sampleAlong(r.path,step);
+  heads=samples.map((p,i)=>bearing(p,samples[Math.min(i+4,samples.length-1)]));
+  for(let i=samples.length-1;i>0&&hav(samples[i],samples[i-1])<1;i--)heads[i]=heads[i-1];
+  panos=new Array(samples.length);loaded=0;idx=0;curPano=null;curHead=heads[0];
+  if(!pano)pano=new StreetViewPanorama($('pano'),{addressControl:false,linksControl:false,motionTracking:false,motionTrackingControl:false,showRoadLabels:false,enableCloseButton:false});
+  $('seek').max=samples.length-1;$('seek').value=0;$('ctl').hidden=false;
+  status('Trajet de '+(r.dist/1000).toFixed(1)+' km, '+samples.length+' images. Lecture…');
+  preload(my);
+  play();
+ }catch(err){
+  status('Erreur : '+(err&&err.message?err.message:err)+' — vérifiez que Maps JavaScript API, Directions (ou Routes) API sont activées.');
+ }finally{$('go').disabled=false;}
+};
+</script>
+</body>
+</html>
